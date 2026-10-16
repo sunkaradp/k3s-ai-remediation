@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remediator
+  namespace: remediation
+  labels:
+    app.kubernetes.io/name: remediator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: remediator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: remediator
+    spec:
+      serviceAccountName: remediator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: remediator
+          image: ghcr.io/sunkaradp/k3s-ai-remediation:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: REMEDIATION_MODE   # OBSERVE | APPROVAL | AUTO
+              value: OBSERVE
+            - name: DRY_RUN
+              value: "true"
+            - name: LOKI_URL
+              value: http://loki.monitoring:3100
+            - name: OLLAMA_URL
+              value: http://ollama.ai:11434
+            - name: OLLAMA_MODEL
+              value: llama3.1:8b
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}

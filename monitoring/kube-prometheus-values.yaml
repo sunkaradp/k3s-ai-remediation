@@ -1,0 +1,32 @@
+# Values for prometheus-community/kube-prometheus-stack
+grafana:
+  adminPassword: change-me   # replace, or use an existingSecret
+  persistence:
+    enabled: false
+
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    # pick up ServiceMonitors / PrometheusRules from every namespace
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests: {cpu: 100m, memory: 512Mi}
+      limits: {memory: 1Gi}
+
+alertmanager:
+  config:
+    route:
+      receiver: remediator
+      group_by: [alertname, namespace, pod]
+      group_wait: 30s
+      repeat_interval: 1h
+      routes:
+        - matchers: [alertname = "Watchdog"]
+          receiver: "null"
+    receivers:
+      - name: "null"
+      - name: remediator
+        webhook_configs:
+          - url: http://remediator.remediation:8080/webhook/alertmanager
+            send_resolved: true

@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: remediator
+  namespace: remediation
+  labels:
+    app.kubernetes.io/name: remediator
+spec:
+  selector:
+    app.kubernetes.io/name: remediator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: remediator
+  namespace: remediation
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: remediator
+  endpoints:
+    - port: http
+      path: /metrics/
