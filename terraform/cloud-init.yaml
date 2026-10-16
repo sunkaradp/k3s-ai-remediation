@@ -1,0 +1,5 @@
+#cloud-config
+package_update: true
+packages: [curl]
+runcmd:
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" sh -s - server --disable traefik --write-kubeconfig-mode 600 --tls-san "$(curl -s ifconfig.me)"

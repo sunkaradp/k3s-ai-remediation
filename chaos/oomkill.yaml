@@ -1,0 +1,21 @@
+# Allocates more memory than its limit -> OOMKilled -> PodOOMKilled alert
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaos-oom
+  namespace: chaos
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: chaos-oom}
+  template:
+    metadata:
+      labels: {app: chaos-oom}
+    spec:
+      containers:
+        - name: hog
+          image: polinux/stress:1.0.4
+          command: ["stress", "--vm", "1", "--vm-bytes", "200M", "--vm-hang", "0"]
+          resources:
+            requests: {memory: 64Mi}
+            limits: {memory: 128Mi}

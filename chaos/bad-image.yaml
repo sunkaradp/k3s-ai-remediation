@@ -1,0 +1,21 @@
+# Rev 1 is healthy, rev 2 points at a tag that doesn't exist -> KubePodImagePullFailed.
+# run.sh applies rev 1, waits, then patches the image to the bad tag.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaos-image
+  namespace: chaos
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: chaos-image}
+  template:
+    metadata:
+      labels: {app: chaos-image}
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.27-alpine
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 64Mi}

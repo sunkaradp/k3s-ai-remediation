@@ -1,0 +1,21 @@
+# Exits 1 after a few seconds -> CrashLoopBackOff -> KubePodCrashLooping alert
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chaos-crash
+  namespace: chaos
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: chaos-crash}
+  template:
+    metadata:
+      labels: {app: chaos-crash}
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "echo 'ERROR: cannot connect to database'; sleep 5; exit 1"]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {memory: 32Mi}
