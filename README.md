@@ -1,102 +1,89 @@
-# k3s-ai-remediation
+# Kubernetes Incident Remediation for k3s
 
-![ci](https://github.com/sunkaradp/k3s-ai-remediation/actions/workflows/ci.yml/badge.svg)
+A Kubernetes remediation service that connects alert context, local LLM-assisted diagnosis, policy evaluation and a small set of predefined runbooks.
 
-When an alert fires on my k3s cluster, this service collects the context an engineer would look at (events, owner, last log lines), asks a local LLM which fix to apply, and applies it only if the fix is on an allowlist and the safety policy allows it. Then it logs everything.
+The design goal is controlled automation: the model can recommend an action, but it cannot execute arbitrary commands. A policy layer decides whether a runbook is observed, sent for approval or eligible to run.
 
-It grew out of [k8s-platform-intelligence](https://github.com/sunkaradp/k8s-platform-intelligence), where I predicted memory pressure but stopped at "observe". This project is the next step: actually fixing things, safely.
-
-## How it works
+## Architecture
 
 ```mermaid
 flowchart LR
-    P[Prometheus] -->|alert| AM[Alertmanager]
-    AM -->|webhook| R[remediator]
-    R -->|events, owner| K[k8s API]
-    R -->|last logs| L[Loki]
-    R -->|context| O[Ollama LLM]
-    O -->|runbook + confidence| R
-    R --> POL{policy}
-    POL -->|AUTO| RB[run runbook]
-    POL -->|APPROVAL| S[ask human]
-    POL -->|OBSERVE| LOG[log only]
-    RB --> K
+    P[Prometheus] --> A[Alertmanager]
+    A -->|webhook| R[Remediator API]
+    R --> K[Kubernetes API]
+    R --> L[Loki]
+    R --> M[Local model]
+    M -->|structured recommendation| R
+    R --> G{Policy gate}
+    G -->|OBSERVE| O[Audit only]
+    G -->|APPROVAL| H[Human approval]
+    G -->|AUTO, eligible actions| B[Allowlisted runbook]
+    B --> K
 ```
 
-**The LLM never runs commands.** It can only pick one of these runbooks:
+## Design and safety controls
 
-| Runbook | Risk | What it does |
+- **Constrained actions:** the model selects from named runbooks; it does not receive shell or Kubernetes command execution.
+- **Policy ceiling:** `REMEDIATION_MODE` supports `OBSERVE`, `APPROVAL` and `AUTO`.
+- **Risk separation:** medium-risk actions require human approval; automatic execution is restricted to eligible low-risk actions above the configured confidence threshold.
+- **Safe defaults:** `DRY_RUN=true` by default.
+- **Fallback behavior:** invalid model output or an unavailable model falls back to rule-based diagnosis.
+- **Least privilege:** the service RBAC is scoped to the resources and verbs required by the runbooks.
+
+## Available runbooks
+
+| Runbook | Risk | Intended operation |
 |---|---|---|
-| `restart_pod` | low | deletes the pod so the Deployment recreates it |
-| `scale_up` | low | +1 replica, capped at `MAX_REPLICAS` |
-| `increase_memory` | medium | raises the memory limit x1.5, capped at `MEMORY_MAX_MI` |
-| `rollback_deployment` | medium | same as `kubectl rollout undo` |
-| `none` | - | do nothing |
+| `restart_pod` | Low | Delete a pod managed by a controller so it can be recreated |
+| `scale_up` | Low | Increase replicas within the configured cap |
+| `increase_memory` | Medium | Increase a workload memory limit within the configured cap |
+| `rollback_deployment` | Medium | Request a Deployment rollout rollback |
+| `none` | — | Take no action |
 
-If the LLM is down, slow, returns broken JSON or picks something outside the list, a rule-based fallback decides instead.
+## Repository structure
 
-**Safety policy**
-
-- `REMEDIATION_MODE` is the ceiling for the whole cluster: `OBSERVE` (default), `APPROVAL` or `AUTO`
-- Only **low-risk** runbooks with confidence ≥ 0.8 run automatically
-- Medium-risk runbooks always need a human
-- Confidence < 0.5 → observe only
-- `DRY_RUN=true` by default, so a fresh install never changes anything
-- RBAC gives the service only the verbs the runbooks need (no secrets, no namespaces, no exec)
-
-## Repo layout
-
-```
-remediator/        FastAPI service: webhook, context, diagnosis, policy, runbooks + tests
-deploy/remediator/ Kustomize manifests (least-privilege RBAC, non-root, read-only FS)
-monitoring/        kube-prometheus-stack values (Alertmanager -> webhook) + extra alert rules
-gitops/argocd/     App-of-apps: monitoring, Loki, alert rules, remediator
-terraform/         Hetzner server + firewall, k3s via cloud-init
-chaos/             Scenarios that break the cluster on purpose
-.github/workflows/ ruff, pytest, kubeconform, terraform validate, Docker build, Trivy, push to GHCR
+```text
+remediator/         FastAPI webhook, context collection, diagnosis, policy, runbooks and tests
+deploy/remediator/  Kustomize manifests and RBAC
+monitoring/         Prometheus stack values and alert rules
+gitops/argocd/      Argo CD application definitions
+terraform/          Example Hetzner infrastructure provisioning
+chaos/              Fault-injection scenarios
+.github/workflows/  Lint, tests, manifest validation, Terraform validation and image checks
 ```
 
-## Run it
-
-```bash
-# 1. Infra
-cd terraform
-cp terraform.tfvars.example terraform.tfvars   # fill in token + your IP
-terraform init && terraform apply
-# run the get_kubeconfig command from the output, then:
-export KUBECONFIG=$PWD/kubeconfig
-
-# 2. Argo CD + everything else
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-kubectl apply -f ../gitops/argocd/root-app.yaml
-
-# 3. Break something
-../chaos/run.sh oomkill
-kubectl -n remediation logs deploy/remediator -f | grep audit
-```
-
-Local tests:
+## Local development
 
 ```bash
 cd remediator
+python -m venv .venv
+source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
 ```
 
-## Results
+The repository also contains deployment examples for a k3s cluster. Review `terraform/terraform.tfvars.example` and the deployment manifests before applying anything to a real environment. Supply provider tokens and cluster-specific values through local, untracked configuration or your CI secret store.
 
-Filled in from chaos runs (milestone 4).
+## Current implementation status
 
-| Scenario | Correct diagnosis | Fixed | Time to recover |
+The initial service milestone includes the webhook, context collection, rule-based and LLM-assisted diagnosis, policy evaluation, runbooks, tests and CI configuration.
+
+The end-to-end cluster deployment, approval integration and chaos-test verification are tracked separately in the roadmap. The results table is intentionally not populated until repeatable test evidence is available.
+
+| Scenario | Diagnosis | Remediation | Recovery time |
 |---|---|---|---|
-| OOMKilled | - | - | - |
-| CrashLoopBackOff | - | - | - |
-| Bad image tag | - | - | - |
+| OOMKilled | Not yet reported | Not yet reported | Not yet measured |
+| CrashLoopBackOff | Not yet reported | Not yet reported | Not yet measured |
+| Bad image tag | Not yet reported | Not yet reported | Not yet measured |
 
 ## Roadmap
 
-- [x] **1. Base:** webhook, context collection, rule + LLM diagnosis, policy, 4 runbooks, tests, CI
-- [ ] **2. Cluster:** Terraform apply on Hetzner, Argo CD syncing all apps, alerts reaching the webhook
-- [ ] **3. LLM + approval:** Ollama in-cluster, Slack approve/reject buttons for the APPROVAL tier
-- [ ] **4. Verify + results:** check the alert resolves after a fix (roll back if not), run chaos suite, fill the table, demo GIF
+- [x] Initial service, policy layer, runbooks, tests and CI
+- [ ] Provision and validate the target k3s cluster
+- [ ] Verify alert delivery and GitOps synchronization
+- [ ] Complete local-model and human-approval integration
+- [ ] Run the chaos suite and publish measured outcomes
+
+## Related work
+
+This project builds on [k8s-platform-intelligence](https://github.com/sunkaradp/k8s-platform-intelligence), which explores early warning signals for node memory pressure and intentionally stops at observe-only recommendations.
