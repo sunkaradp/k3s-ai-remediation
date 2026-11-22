@@ -133,6 +133,11 @@ The end-to-end cluster deployment, approval integration and chaos-test verificat
 - [ ] Complete local-model and human-approval integration
 - [ ] Run the chaos suite and publish measured outcomes
 
+## Architecture and verification evidence
+
+- [Architecture diagram and trust boundaries](docs/architecture.md)
+- [CI checks, implemented scope and evidence gaps](docs/evidence.md)
+
 ## Related work
 
 This project builds on [k8s-platform-intelligence](https://github.com/sunkaradp/k8s-platform-intelligence), which explores early warning signals for node memory pressure and intentionally stops at observe-only recommendations.
