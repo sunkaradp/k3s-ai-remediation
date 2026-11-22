@@ -1,8 +1,9 @@
-"""The only actions the remediator can take. Each one is small, reversible and logged."""
+"""Allowlisted, dry-run-first Kubernetes remediation runbooks."""
 
 import logging
 import os
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 
 from app.models import Context
 
@@ -12,6 +13,25 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 MEMORY_STEP = float(os.getenv("MEMORY_STEP", "1.5"))
 MEMORY_MAX_MI = int(os.getenv("MEMORY_MAX_MI", "2048"))
 MAX_REPLICAS = int(os.getenv("MAX_REPLICAS", "5"))
+
+if MEMORY_STEP <= 1:
+    raise ValueError("MEMORY_STEP must be greater than 1")
+if MEMORY_MAX_MI < 1 or MAX_REPLICAS < 1:
+    raise ValueError("MEMORY_MAX_MI and MAX_REPLICAS must be positive")
+
+
+def _allowed(ctx: Context) -> bool:
+    """Fail closed unless the alert namespace is explicitly allowlisted."""
+    allowed = {
+        item.strip()
+        for item in os.getenv("REMEDIATION_ALLOWED_NAMESPACES", "").split(",")
+        if item.strip()
+    }
+    namespace = ctx.alert.namespace
+    if not namespace or namespace not in allowed:
+        log.warning("deny remediation: namespace %r is not allowlisted", namespace)
+        return False
+    return True
 
 
 def _apps():
@@ -25,86 +45,165 @@ def _apps():
 
 
 def to_mi(value: str) -> int:
-    units = {"Ki": 1 / 1024, "Mi": 1, "Gi": 1024}
-    for suffix, factor in units.items():
-        if value.endswith(suffix):
-            return int(float(value[: -len(suffix)]) * factor)
-    return int(int(value) / (1024 * 1024))  # plain bytes
+    """Convert common Kubernetes memory quantities to whole mebibytes."""
+    quantity = str(value).strip()
+    units = {
+        "Ki": Decimal(1) / Decimal(1024),
+        "Mi": Decimal(1),
+        "Gi": Decimal(1024),
+        "Ti": Decimal(1024 * 1024),
+    }
+    try:
+        for suffix, factor in units.items():
+            if quantity.endswith(suffix):
+                amount = Decimal(quantity[: -len(suffix)]) * factor
+                break
+        else:
+            amount = Decimal(quantity) / Decimal(1024 * 1024)
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"invalid memory quantity: {value!r}") from exc
+
+    if not amount.is_finite() or amount < 0:
+        raise ValueError(f"invalid memory quantity: {value!r}")
+    return int(amount)
 
 
 def restart_pod(ctx: Context) -> str:
-    ns, pod = ctx.alert.namespace, ctx.alert.pod
+    namespace, pod = ctx.alert.namespace, ctx.alert.pod
+    if not _allowed(ctx):
+        return "skipped: namespace is not allowlisted"
+    if not pod:
+        return "skipped: alert is missing pod"
     if DRY_RUN:
-        return f"[dry-run] would delete pod {ns}/{pod}"
+        return f"[dry-run] would delete pod {namespace}/{pod}"
+
     core, _ = _apps()
-    core.delete_namespaced_pod(pod, ns)
-    return f"deleted pod {ns}/{pod}"
+    core.delete_namespaced_pod(pod, namespace)
+    return f"deleted pod {namespace}/{pod}"
 
 
 def rollback_deployment(ctx: Context) -> str:
-    """Same as `kubectl rollout undo`: copy the previous ReplicaSet template back."""
-    if ctx.owner_kind != "Deployment":
+    if not _allowed(ctx):
+        return "skipped: namespace is not allowlisted"
+    if ctx.owner_kind != "Deployment" or not ctx.owner_name:
         return "skipped: owner is not a Deployment"
-    ns, name = ctx.alert.namespace, ctx.owner_name
+
+    namespace, name = ctx.alert.namespace, ctx.owner_name
     if DRY_RUN:
-        return f"[dry-run] would roll back deployment {ns}/{name}"
+        return f"[dry-run] would roll back deployment {namespace}/{name}"
+
+    from kubernetes import client
+
     _, apps = _apps()
-    dep = apps.read_namespaced_deployment(name, ns)
-    selector = ",".join(f"{k}={v}" for k, v in dep.spec.selector.match_labels.items())
-    rss = apps.list_namespaced_replica_set(ns, label_selector=selector).items
-    rss.sort(key=lambda r: int(r.metadata.annotations["deployment.kubernetes.io/revision"]))
-    if len(rss) < 2:
+    deployment = apps.read_namespaced_deployment(name, namespace)
+    selector = ",".join(
+        f"{key}={value}"
+        for key, value in (deployment.spec.selector.match_labels or {}).items()
+    )
+    replica_sets = apps.list_namespaced_replica_set(
+        namespace,
+        label_selector=selector,
+    ).items
+
+    deployment_uid = deployment.metadata.uid
+    revisions = []
+    for replica_set in replica_sets:
+        annotations = replica_set.metadata.annotations or {}
+        revision = annotations.get("deployment.kubernetes.io/revision", "")
+        owned_by_deployment = any(
+            owner.kind == "Deployment"
+            and owner.name == name
+            and (not deployment_uid or owner.uid == deployment_uid)
+            for owner in (replica_set.metadata.owner_references or [])
+        )
+        if owned_by_deployment and revision.isdigit():
+            revisions.append((int(revision), replica_set))
+
+    revisions.sort(key=lambda item: item[0])
+    if len(revisions) < 2:
         return "skipped: no previous revision"
-    template = rss[-2].spec.template
-    template.metadata.labels.pop("pod-template-hash", None)
-    apps.patch_namespaced_deployment(name, ns, {"spec": {"template": template}})
-    return f"rolled back deployment {ns}/{name}"
+
+    previous_template = revisions[-2][1].spec.template
+    template = client.ApiClient().sanitize_for_serialization(previous_template)
+    labels = template.get("metadata", {}).get("labels", {})
+    labels.pop("pod-template-hash", None)
+    apps.patch_namespaced_deployment(
+        name,
+        namespace,
+        {"spec": {"template": template}},
+    )
+    return f"rolled back deployment {namespace}/{name}"
 
 
 def increase_memory(ctx: Context) -> str:
-    if ctx.owner_kind != "Deployment":
+    if not _allowed(ctx):
+        return "skipped: namespace is not allowlisted"
+    if ctx.owner_kind != "Deployment" or not ctx.owner_name:
         return "skipped: owner is not a Deployment"
-    ns, name = ctx.alert.namespace, ctx.owner_name
-    container = ctx.alert.labels.get("container")
+
+    namespace, name = ctx.alert.namespace, ctx.owner_name
+    container_name = ctx.alert.labels.get("container")
+    if not container_name:
+        return "skipped: alert is missing container label"
     if DRY_RUN:
-        return f"[dry-run] would raise memory limit x{MEMORY_STEP} on {ns}/{name}/{container}"
+        return (
+            f"[dry-run] would raise memory limit x{MEMORY_STEP} "
+            f"on {namespace}/{name}/{container_name}"
+        )
+
     _, apps = _apps()
-    dep = apps.read_namespaced_deployment(name, ns)
-    for c in dep.spec.template.spec.containers:
-        if container and c.name != container:
+    deployment = apps.read_namespaced_deployment(name, namespace)
+    for container in deployment.spec.template.spec.containers:
+        if container.name != container_name:
             continue
-        current = to_mi((c.resources.limits or {}).get("memory", "256Mi"))
+
+        limits = container.resources.limits or {}
+        current = to_mi(limits.get("memory", "256Mi"))
         new = min(int(current * MEMORY_STEP), MEMORY_MAX_MI)
         if new <= current:
-            return f"skipped: {c.name} already at max {MEMORY_MAX_MI}Mi"
+            return f"skipped: {container.name} already at max {MEMORY_MAX_MI}Mi"
+
         patch = {
             "spec": {
                 "template": {
                     "spec": {
                         "containers": [
-                            {"name": c.name, "resources": {"limits": {"memory": f"{new}Mi"}}}
+                            {
+                                "name": container.name,
+                                "resources": {"limits": {"memory": f"{new}Mi"}},
+                            }
                         ]
                     }
                 }
             }
         }
-        apps.patch_namespaced_deployment(name, ns, patch)
-        return f"memory {c.name}: {current}Mi -> {new}Mi"
+        apps.patch_namespaced_deployment(name, namespace, patch)
+        return f"memory {container.name}: {current}Mi -> {new}Mi"
+
     return "skipped: container not found"
 
 
 def scale_up(ctx: Context) -> str:
-    if ctx.owner_kind != "Deployment":
+    if not _allowed(ctx):
+        return "skipped: namespace is not allowlisted"
+    if ctx.owner_kind != "Deployment" or not ctx.owner_name:
         return "skipped: owner is not a Deployment"
-    ns, name = ctx.alert.namespace, ctx.owner_name
+
+    namespace, name = ctx.alert.namespace, ctx.owner_name
     if DRY_RUN:
-        return f"[dry-run] would add 1 replica to {ns}/{name}"
+        return f"[dry-run] would add 1 replica to {namespace}/{name}"
+
     _, apps = _apps()
-    current = apps.read_namespaced_deployment_scale(name, ns).spec.replicas
+    current = apps.read_namespaced_deployment_scale(name, namespace).spec.replicas or 0
     if current >= MAX_REPLICAS:
         return f"skipped: already at {MAX_REPLICAS} replicas"
-    apps.patch_namespaced_deployment_scale(name, ns, {"spec": {"replicas": current + 1}})
-    return f"scaled {ns}/{name}: {current} -> {current + 1}"
+
+    apps.patch_namespaced_deployment_scale(
+        name,
+        namespace,
+        {"spec": {"replicas": current + 1}},
+    )
+    return f"scaled {namespace}/{name}: {current} -> {current + 1}"
 
 
 RUNBOOKS = {
@@ -116,10 +215,11 @@ RUNBOOKS = {
 
 
 def run(name: str, ctx: Context) -> str:
-    fn = RUNBOOKS.get(name)
-    if fn is None:
+    runbook = RUNBOOKS.get(name)
+    if runbook is None:
         return "no action"
+
     started = datetime.now(UTC).isoformat()
-    result = fn(ctx)
+    result = runbook(ctx)
     log.info("runbook=%s started=%s result=%s", name, started, result)
     return result
