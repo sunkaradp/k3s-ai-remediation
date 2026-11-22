@@ -3,7 +3,7 @@
 import logging
 import os
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 
 from app.models import Context
 
