@@ -10,7 +10,7 @@ from app.models import Alert, Context
 log = logging.getLogger(__name__)
 
 LOKI_URL = os.getenv("LOKI_URL", "http://loki.monitoring:3100")
-LOG_LINES = int(os.getenv("CONTEXT_LOG_LINES", "50"))
+LOG_LINES = max(1, min(int(os.getenv("CONTEXT_LOG_LINES", "50")), 500))
 
 
 def _k8s():
