@@ -97,8 +97,7 @@ def rollback_deployment(ctx: Context) -> str:
     _, apps = _apps()
     deployment = apps.read_namespaced_deployment(name, namespace)
     selector = ",".join(
-        f"{key}={value}"
-        for key, value in (deployment.spec.selector.match_labels or {}).items()
+        f"{key}={value}" for key, value in (deployment.spec.selector.match_labels or {}).items()
     )
     replica_sets = apps.list_namespaced_replica_set(
         namespace,
