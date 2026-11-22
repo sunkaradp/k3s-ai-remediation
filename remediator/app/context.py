@@ -40,8 +40,13 @@ def _events(core, namespace: str, pod: str) -> list[str]:
     return [f"{e.type} {e.reason}: {e.message}" for e in evs.items[-10:]]
 
 
+def _escape_logql_label(value: str) -> str:
+    """Escape user-controlled label values before embedding them in a LogQL string."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+
+
 def _loki_logs(namespace: str, pod: str) -> str:
-    query = f'{{namespace="{namespace}", pod="{pod}"}}'
+    query = f'{{namespace="{_escape_logql_label(namespace)}", pod="{_escape_logql_label(pod)}"}}'
     r = httpx.get(
         f"{LOKI_URL}/loki/api/v1/query_range",
         params={"query": query, "limit": LOG_LINES, "direction": "backward"},
@@ -50,7 +55,6 @@ def _loki_logs(namespace: str, pod: str) -> str:
     r.raise_for_status()
     lines = [v[1] for s in r.json()["data"]["result"] for v in s["values"]]
     return "\n".join(reversed(lines))
-
 
 def collect(alert: Alert) -> Context:
     ctx = Context(alert=alert)
