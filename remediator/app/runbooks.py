@@ -3,7 +3,7 @@
 import logging
 import os
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 
 from app.models import Context
 
@@ -65,7 +65,7 @@ def to_mi(value: str) -> int:
 
     if not amount.is_finite() or amount < 0:
         raise ValueError(f"invalid memory quantity: {value!r}")
-    return int(amount)
+    return int(amount.to_integral_value(rounding=ROUND_CEILING))
 
 
 def restart_pod(ctx: Context) -> str:
