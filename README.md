@@ -66,6 +66,53 @@ pytest -q
 
 The repository also contains deployment examples for a k3s cluster. Review `terraform/terraform.tfvars.example` and the deployment manifests before applying anything to a real environment. Supply provider tokens and cluster-specific values through local, untracked configuration or your CI secret store.
 
+
+## Try the webhook locally
+
+This smoke test runs the API without a Kubernetes cluster. Keep the default policy mode at `OBSERVE`; the example demonstrates diagnosis and audit output, not a live cluster change.
+
+Requirements: Python 3.12+.
+
+```bash
+cd remediator
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+LLM_ENABLED=false uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+In a second terminal, check health and submit a sample Alertmanager v4 payload:
+
+```bash
+curl --fail http://127.0.0.1:8000/healthz
+
+curl --fail --request POST http://127.0.0.1:8000/webhook/alertmanager \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+    "version": "4",
+    "status": "firing",
+    "receiver": "local-demo",
+    "alerts": [{
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodCrashLooping",
+        "namespace": "demo",
+        "pod": "api-7d9c8f"
+      },
+      "annotations": {"summary": "Demo pod is restarting"}
+    }]
+  }'
+```
+
+With `LLM_ENABLED=false`, the deterministic rule-based fallback is used. Since the default `REMEDIATION_MODE` is `OBSERVE`, the response should report an observe-only decision. The API also exposes Prometheus metrics at `/metrics`.
+
+### Before connecting a cluster
+
+- Keep `REMEDIATION_MODE=OBSERVE` and `DRY_RUN=true` for initial validation.
+- Review the namespace allowlist, service account RBAC, resource limits and network access.
+- Configure and test the Ollama endpoint separately if LLM diagnosis is enabled.
+- Do not switch to `APPROVAL` or `AUTO` until the approval path, rollback behavior and runbooks have been validated in a disposable cluster.
+
 ## Current implementation status
 
 The initial service milestone includes the webhook, context collection, rule-based and LLM-assisted diagnosis, policy evaluation, runbooks, tests and CI configuration.
