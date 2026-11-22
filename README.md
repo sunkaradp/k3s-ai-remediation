@@ -1,5 +1,7 @@
 # Kubernetes Incident Remediation for k3s
 
+[![CI](https://github.com/sunkaradp/k3s-ai-remediation/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sunkaradp/k3s-ai-remediation/actions/workflows/ci.yml)
+
 A Kubernetes remediation service that connects alert context, local LLM-assisted diagnosis, policy evaluation and a small set of predefined runbooks.
 
 The design goal is controlled automation: the model can recommend an action, but it cannot execute arbitrary commands. A policy layer decides whether a runbook is observed, sent for approval or eligible to run.
