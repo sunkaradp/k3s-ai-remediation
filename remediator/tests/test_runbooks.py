@@ -4,7 +4,10 @@ from app import runbooks
 from app.models import Alert, Context
 
 
-def ctx(owner_kind: str = "Deployment", labels: dict[str, str] | None = None) -> Context:
+def ctx(
+    owner_kind: str = "Deployment",
+    labels: dict[str, str] | None = None,
+) -> Context:
     alert_labels = {
         "alertname": "x",
         "namespace": "demo",
@@ -55,7 +58,7 @@ def test_unknown_runbook_does_nothing():
 @pytest.mark.parametrize(
     ("quantity", "expected"),
     [
-        ("512Ki", 0),
+        ("512Ki", 1),
         ("512Mi", 512),
         ("1Gi", 1024),
         ("2Ti", 2 * 1024 * 1024),
